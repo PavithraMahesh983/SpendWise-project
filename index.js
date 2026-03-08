@@ -1,170 +1,104 @@
 'use strict';
 
-const stringify = require('./lib/stringify');
-const compile = require('./lib/compile');
-const expand = require('./lib/expand');
-const parse = require('./lib/parse');
+Object.defineProperty(exports, "__esModule", { value: true });
+
+const picomatch = require('picomatch');
+const normalizePath = require('normalize-path');
 
 /**
- * Expand the given pattern or create a regex-compatible string.
- *
- * ```js
- * const braces = require('braces');
- * console.log(braces('{a,b,c}', { compile: true })); //=> ['(a|b|c)']
- * console.log(braces('{a,b,c}')); //=> ['a', 'b', 'c']
- * ```
- * @param {String} `str`
- * @param {Object} `options`
- * @return {String}
- * @api public
+ * @typedef {(testString: string) => boolean} AnymatchFn
+ * @typedef {string|RegExp|AnymatchFn} AnymatchPattern
+ * @typedef {AnymatchPattern|AnymatchPattern[]} AnymatchMatcher
  */
+const BANG = '!';
+const DEFAULT_OPTIONS = {returnIndex: false};
+const arrify = (item) => Array.isArray(item) ? item : [item];
 
-const braces = (input, options = {}) => {
-  let output = [];
+/**
+ * @param {AnymatchPattern} matcher
+ * @param {object} options
+ * @returns {AnymatchFn}
+ */
+const createPattern = (matcher, options) => {
+  if (typeof matcher === 'function') {
+    return matcher;
+  }
+  if (typeof matcher === 'string') {
+    const glob = picomatch(matcher, options);
+    return (string) => matcher === string || glob(string);
+  }
+  if (matcher instanceof RegExp) {
+    return (string) => matcher.test(string);
+  }
+  return (string) => false;
+};
 
-  if (Array.isArray(input)) {
-    for (const pattern of input) {
-      const result = braces.create(pattern, options);
-      if (Array.isArray(result)) {
-        output.push(...result);
-      } else {
-        output.push(result);
-      }
+/**
+ * @param {Array<Function>} patterns
+ * @param {Array<Function>} negPatterns
+ * @param {String|Array} args
+ * @param {Boolean} returnIndex
+ * @returns {boolean|number}
+ */
+const matchPatterns = (patterns, negPatterns, args, returnIndex) => {
+  const isList = Array.isArray(args);
+  const _path = isList ? args[0] : args;
+  if (!isList && typeof _path !== 'string') {
+    throw new TypeError('anymatch: second argument must be a string: got ' +
+      Object.prototype.toString.call(_path))
+  }
+  const path = normalizePath(_path, false);
+
+  for (let index = 0; index < negPatterns.length; index++) {
+    const nglob = negPatterns[index];
+    if (nglob(path)) {
+      return returnIndex ? -1 : false;
     }
-  } else {
-    output = [].concat(braces.create(input, options));
   }
 
-  if (options && options.expand === true && options.nodupes === true) {
-    output = [...new Set(output)];
+  const applied = isList && [path].concat(args.slice(1));
+  for (let index = 0; index < patterns.length; index++) {
+    const pattern = patterns[index];
+    if (isList ? pattern(...applied) : pattern(path)) {
+      return returnIndex ? index : true;
+    }
   }
-  return output;
+
+  return returnIndex ? -1 : false;
 };
 
 /**
- * Parse the given `str` with the given `options`.
- *
- * ```js
- * // braces.parse(pattern, [, options]);
- * const ast = braces.parse('a/{b,c}/d');
- * console.log(ast);
- * ```
- * @param {String} pattern Brace pattern to parse
- * @param {Object} options
- * @return {Object} Returns an AST
- * @api public
+ * @param {AnymatchMatcher} matchers
+ * @param {Array|string} testString
+ * @param {object} options
+ * @returns {boolean|number|Function}
  */
-
-braces.parse = (input, options = {}) => parse(input, options);
-
-/**
- * Creates a braces string from an AST, or an AST node.
- *
- * ```js
- * const braces = require('braces');
- * let ast = braces.parse('foo/{a,b}/bar');
- * console.log(stringify(ast.nodes[2])); //=> '{a,b}'
- * ```
- * @param {String} `input` Brace pattern or AST.
- * @param {Object} `options`
- * @return {Array} Returns an array of expanded values.
- * @api public
- */
-
-braces.stringify = (input, options = {}) => {
-  if (typeof input === 'string') {
-    return stringify(braces.parse(input, options), options);
+const anymatch = (matchers, testString, options = DEFAULT_OPTIONS) => {
+  if (matchers == null) {
+    throw new TypeError('anymatch: specify first argument');
   }
-  return stringify(input, options);
+  const opts = typeof options === 'boolean' ? {returnIndex: options} : options;
+  const returnIndex = opts.returnIndex || false;
+
+  // Early cache for matchers.
+  const mtchers = arrify(matchers);
+  const negatedGlobs = mtchers
+    .filter(item => typeof item === 'string' && item.charAt(0) === BANG)
+    .map(item => item.slice(1))
+    .map(item => picomatch(item, opts));
+  const patterns = mtchers
+    .filter(item => typeof item !== 'string' || (typeof item === 'string' && item.charAt(0) !== BANG))
+    .map(matcher => createPattern(matcher, opts));
+
+  if (testString == null) {
+    return (testString, ri = false) => {
+      const returnIndex = typeof ri === 'boolean' ? ri : false;
+      return matchPatterns(patterns, negatedGlobs, testString, returnIndex);
+    }
+  }
+
+  return matchPatterns(patterns, negatedGlobs, testString, returnIndex);
 };
 
-/**
- * Compiles a brace pattern into a regex-compatible, optimized string.
- * This method is called by the main [braces](#braces) function by default.
- *
- * ```js
- * const braces = require('braces');
- * console.log(braces.compile('a/{b,c}/d'));
- * //=> ['a/(b|c)/d']
- * ```
- * @param {String} `input` Brace pattern or AST.
- * @param {Object} `options`
- * @return {Array} Returns an array of expanded values.
- * @api public
- */
-
-braces.compile = (input, options = {}) => {
-  if (typeof input === 'string') {
-    input = braces.parse(input, options);
-  }
-  return compile(input, options);
-};
-
-/**
- * Expands a brace pattern into an array. This method is called by the
- * main [braces](#braces) function when `options.expand` is true. Before
- * using this method it's recommended that you read the [performance notes](#performance))
- * and advantages of using [.compile](#compile) instead.
- *
- * ```js
- * const braces = require('braces');
- * console.log(braces.expand('a/{b,c}/d'));
- * //=> ['a/b/d', 'a/c/d'];
- * ```
- * @param {String} `pattern` Brace pattern
- * @param {Object} `options`
- * @return {Array} Returns an array of expanded values.
- * @api public
- */
-
-braces.expand = (input, options = {}) => {
-  if (typeof input === 'string') {
-    input = braces.parse(input, options);
-  }
-
-  let result = expand(input, options);
-
-  // filter out empty strings if specified
-  if (options.noempty === true) {
-    result = result.filter(Boolean);
-  }
-
-  // filter out duplicates if specified
-  if (options.nodupes === true) {
-    result = [...new Set(result)];
-  }
-
-  return result;
-};
-
-/**
- * Processes a brace pattern and returns either an expanded array
- * (if `options.expand` is true), a highly optimized regex-compatible string.
- * This method is called by the main [braces](#braces) function.
- *
- * ```js
- * const braces = require('braces');
- * console.log(braces.create('user-{200..300}/project-{a,b,c}-{1..10}'))
- * //=> 'user-(20[0-9]|2[1-9][0-9]|300)/project-(a|b|c)-([1-9]|10)'
- * ```
- * @param {String} `pattern` Brace pattern
- * @param {Object} `options`
- * @return {Array} Returns an array of expanded values.
- * @api public
- */
-
-braces.create = (input, options = {}) => {
-  if (input === '' || input.length < 3) {
-    return [input];
-  }
-
-  return options.expand !== true
-    ? braces.compile(input, options)
-    : braces.expand(input, options);
-};
-
-/**
- * Expose "braces"
- */
-
-module.exports = braces;
+anymatch.default = anymatch;
+module.exports = anymatch;
